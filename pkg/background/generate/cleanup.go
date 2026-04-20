@@ -138,12 +138,12 @@ func (c *GenerateController) getDownstreams(rule kyvernov1.Rule, selector map[st
 	// delete downstreams that were cloned from other sources in the same cloneList.
 	if admReq := ur.Spec.Context.AdmissionRequestInfo.AdmissionRequest; admReq != nil {
 		if ur.Spec.Context.AdmissionRequestInfo.Operation == admissionv1.Delete {
-			_, oldResource, err := admissionutils.ExtractResources(nil, *admReq)
-			if err == nil {
-				if _, ok := oldResource.GetLabels()[common.GenerateTypeCloneSourceLabel]; ok {
-					if uid := string(oldResource.GetUID()); uid != "" {
-						selector[common.GenerateSourceUIDLabel] = uid
-					}
+			_, oldResource, extractErr := admissionutils.ExtractResources(nil, *admReq)
+			if extractErr != nil {
+				c.log.V(4).Info("failed to extract old resource from admission request; proceeding without source UID filter", "error", extractErr)
+			} else if _, ok := oldResource.GetLabels()[common.GenerateTypeCloneSourceLabel]; ok {
+				if uid := string(oldResource.GetUID()); uid != "" {
+					selector[common.GenerateSourceUIDLabel] = uid
 				}
 			}
 		}
@@ -161,6 +161,10 @@ func (c *GenerateController) getDownstreams(rule kyvernov1.Rule, selector map[st
 			// Fetch downstream resources using the trigger name label
 			delete(selector, common.GenerateTriggerUIDLabel)
 			selector[common.GenerateTriggerNameLabel] = ur.Spec.GetResource().GetName()
+			// Note: GenerateSourceUIDLabel (if present) is intentionally kept in the
+			// selector during the name-based fallback. Removing it would cause all
+			// downstreams for the trigger to be returned, re-introducing the bug where
+			// a single source deletion deletes every downstream for that trigger.
 			c.log.V(4).Info("fetching downstream resource by the name", "APIVersion", apiVersion, "kind", kind, "selector", selector)
 			kindList, err = common.FindDownstream(c.client, apiVersion, kind, selector)
 			if err != nil {
