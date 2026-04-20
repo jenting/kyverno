@@ -8,8 +8,10 @@ import (
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
 	kyvernov1beta1 "github.com/kyverno/kyverno/api/kyverno/v1beta1"
 	"github.com/kyverno/kyverno/pkg/background/common"
+	admissionutils "github.com/kyverno/kyverno/pkg/utils/admission"
 	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
 	"go.uber.org/multierr"
+	admissionv1 "k8s.io/api/admission/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -130,23 +132,42 @@ func (c *GenerateController) getDownstreams(rule kyvernov1.Rule, selector map[st
 	}
 
 	dsList := &unstructured.UnstructuredList{}
+
+	// When the UR was created because a clone source was deleted, restrict the search to
+	// the downstream that corresponds to that specific source, so we don't accidentally
+	// delete downstreams that were cloned from other sources in the same cloneList.
+	if admReq := ur.Spec.Context.AdmissionRequestInfo.AdmissionRequest; admReq != nil {
+		if ur.Spec.Context.AdmissionRequestInfo.Operation == admissionv1.Delete {
+			_, oldResource, err := admissionutils.ExtractResources(nil, *admReq)
+			if err == nil {
+				if _, ok := oldResource.GetLabels()[common.GenerateTypeCloneSourceLabel]; ok {
+					if uid := string(oldResource.GetUID()); uid != "" {
+						selector[common.GenerateSourceUIDLabel] = uid
+					}
+				}
+			}
+		}
+	}
+
 	for _, kind := range rule.Generation.CloneList.Kinds {
 		apiVersion, kind := kubeutils.GetKindFromGVK(kind)
 		c.log.V(4).Info("fetching downstream cloneList resources by the UID", "APIVersion", apiVersion, "kind", kind, "selector", selector)
-		dsList, err = common.FindDownstream(c.client, apiVersion, kind, selector)
+		kindList, err := common.FindDownstream(c.client, apiVersion, kind, selector)
 		if err != nil {
 			return nil, err
 		}
 
-		if len(dsList.Items) == 0 {
+		if len(kindList.Items) == 0 {
+			// Fetch downstream resources using the trigger name label
 			delete(selector, common.GenerateTriggerUIDLabel)
 			selector[common.GenerateTriggerNameLabel] = ur.Spec.GetResource().GetName()
-			c.log.V(4).Info("fetching downstream resource by the name", "APIVersion", rule.Generation.GetAPIVersion(), "kind", rule.Generation.GetKind(), "selector", selector)
-			dsList, err = common.FindDownstream(c.client, rule.Generation.GetAPIVersion(), rule.Generation.GetKind(), selector)
+			c.log.V(4).Info("fetching downstream resource by the name", "APIVersion", apiVersion, "kind", kind, "selector", selector)
+			kindList, err = common.FindDownstream(c.client, apiVersion, kind, selector)
 			if err != nil {
 				return nil, err
 			}
 		}
+		dsList.Items = append(dsList.Items, kindList.Items...)
 	}
 	return dsList, nil
 }
