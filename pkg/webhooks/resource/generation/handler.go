@@ -328,6 +328,12 @@ func (h *generationHandler) processRequest(ctx context.Context, policyContext *e
 				}
 
 				ur := buildURSpec(kyvernov1beta1.Generate, pKey, rule.Name, generateutils.TriggerFromLabels(labels), deleteDownstream)
+				// carry the admission request when deleting a downstream on source
+				// deletion so the background controller can scope the cleanup to the
+				// target(s) cloned from the deleted source only.
+				if deleteDownstream {
+					ur.Context = buildURContext(request, policyContext)
+				}
 				if err := h.urGenerator.Apply(ctx, ur); err != nil {
 					e := event.NewBackgroundFailedEvent(err, policy, pRuleName, event.GeneratePolicyController,
 						kyvernov1.ResourceSpec{Kind: new.GetKind(), Namespace: new.GetNamespace(), Name: new.GetName()})
